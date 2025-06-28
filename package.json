@@ -4,7 +4,8 @@
   "description": "A signaling server for an Omegle-like video chat application using Express and Socket.IO.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "build": "nodemon index.js"
   },
   "keywords": [
     "express",
