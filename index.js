@@ -4,86 +4,138 @@ const { Server } = require("socket.io")
 
 const app = express()
 const httpServer = createServer(app)
+
+console.log("🚀 Starting signaling server...")
+
 const io = new Server(httpServer, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  transports: ["websocket", "polling"],
 })
 
-// Waiting peer object structure: { socketId: string, timestamp: number }
-let waitingPeer = null
-
-// Clean up old waiting peers (older than 30 seconds)
-setInterval(() => {
-  if (waitingPeer && Date.now() - waitingPeer.timestamp > 30000) {
-    console.log("🧹 Cleaning up stale waiting peer:", waitingPeer.socketId)
-    waitingPeer = null
-  }
-}, 10000)
+// Simple tracking
+const connectedUsers = new Set()
+const waitingUsers = new Set()
+const activeConnections = new Map() // socketId -> partnerId
 
 io.on("connection", (socket) => {
-  console.log("🔌 Client connected:", socket.id)
+  console.log("🔌 User connected:", socket.id)
+  connectedUsers.add(socket.id)
 
   socket.on("ready", () => {
     console.log("👤 User ready:", socket.id)
 
-    if (waitingPeer && waitingPeer.socketId !== socket.id) {
-      // Pair them up
-      console.log("🤝 Pairing:", socket.id, "with", waitingPeer.socketId)
+    // Remove from any existing connection
+    if (activeConnections.has(socket.id)) {
+      const partnerId = activeConnections.get(socket.id)
+      activeConnections.delete(socket.id)
+      activeConnections.delete(partnerId)
 
-      socket.emit("match", { peerId: waitingPeer.socketId })
-      io.to(waitingPeer.socketId).emit("match", { peerId: socket.id })
-
-      waitingPeer = null
-    } else {
-      // Add to waiting queue
-      waitingPeer = {
-        socketId: socket.id,
-        timestamp: Date.now(),
-      }
-      console.log("⏳ Added to waiting queue:", socket.id)
+      // Notify partner
+      io.to(partnerId).emit("partnerLeft")
     }
+
+    // Remove from waiting
+    waitingUsers.delete(socket.id)
+
+    // Find someone to match with
+    let partner = null
+    for (const waitingUser of waitingUsers) {
+      if (waitingUser !== socket.id && connectedUsers.has(waitingUser)) {
+        partner = waitingUser
+        break
+      }
+    }
+
+    if (partner) {
+      // Match found
+      waitingUsers.delete(partner)
+
+      // Create connection
+      activeConnections.set(socket.id, partner)
+      activeConnections.set(partner, socket.id)
+
+      console.log("🤝 Matched:", socket.id, "with", partner)
+
+      // Notify both
+      socket.emit("matched", { peerId: partner })
+      io.to(partner).emit("matched", { peerId: socket.id })
+    } else {
+      // Add to waiting
+      waitingUsers.add(socket.id)
+      console.log("⏳ Added to queue:", socket.id, "Queue size:", waitingUsers.size)
+    }
+
+    console.log(
+      "📊 Connected:",
+      connectedUsers.size,
+      "Waiting:",
+      waitingUsers.size,
+      "Active:",
+      activeConnections.size / 2,
+    )
   })
 
   socket.on("signal", ({ to, data }) => {
-    // Forward signaling data between peers
+    console.log("📡 Signal from", socket.id, "to", to)
     io.to(to).emit("signal", { from: socket.id, data })
   })
 
   socket.on("disconnect", () => {
-    console.log("🔌 Client disconnected:", socket.id)
+    console.log("🔌 User disconnected:", socket.id)
 
-    // Remove from waiting queue if present
-    if (waitingPeer && waitingPeer.socketId === socket.id) {
-      waitingPeer = null
-      console.log("🗑️ Removed from waiting queue:", socket.id)
+    // Remove from all tracking
+    connectedUsers.delete(socket.id)
+    waitingUsers.delete(socket.id)
+
+    // Handle active connection
+    if (activeConnections.has(socket.id)) {
+      const partnerId = activeConnections.get(socket.id)
+      activeConnections.delete(socket.id)
+      activeConnections.delete(partnerId)
+
+      // Notify partner
+      io.to(partnerId).emit("partnerLeft")
     }
+
+    console.log(
+      "📊 Connected:",
+      connectedUsers.size,
+      "Waiting:",
+      waitingUsers.size,
+      "Active:",
+      activeConnections.size / 2,
+    )
   })
 })
 
-// Health check endpoint
+// Health check
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
+    stats: {
+      totalUsers: connectedUsers.size,
+      waitingUsers: waitingUsers.size,
+      activeChats: activeConnections.size / 2,
+    },
     timestamp: new Date().toISOString(),
-    connections: io.engine.clientsCount,
-    waiting: waitingPeer ? 1 : 0,
   })
 })
 
-// Basic info endpoint
 app.get("/", (req, res) => {
   res.json({
-    name: "Omegle Video Chat Signaling Server",
+    name: "Video Chat Server",
     status: "running",
-    connections: io.engine.clientsCount,
-    waiting: waitingPeer ? 1 : 0,
+    totalUsers: connectedUsers.size,
+    waiting: waitingUsers.size,
+    activeChats: activeConnections.size / 2,
   })
 })
 
 const PORT = process.env.PORT || 4000
 httpServer.listen(PORT, () => {
-  console.log(`🚀 Signaling server running on port ${PORT}`)
-  console.log(`📊 Health check available at http://localhost:${PORT}/health`)
+  console.log(`🚀 Server running on port ${PORT}`)
+  console.log(`📊 Health: http://localhost:${PORT}/health`)
 })
