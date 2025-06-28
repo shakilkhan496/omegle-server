@@ -1,12 +1,11 @@
 {
   "name": "omegle-signalling-server",
   "version": "1.0.0",
-  "description": "Express + Socket.io signalling backend for random video chat",
-  "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "build": "echo \"no build step\""
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -17,11 +16,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "keywords": [
-    "signalling",
-    "webrtc",
-    "socket.io"
-  ],
-  "license": "MIT"
+  }
 }
