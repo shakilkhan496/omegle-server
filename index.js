@@ -1,9 +1,12 @@
 const express = require("express")
 const { createServer } = require("http")
 const { Server } = require("socket.io")
+const cors = require('cors');
 
 const app = express()
 const httpServer = createServer(app)
+app.use(cors());
+app.options('*', cors());
 
 console.log("🚀 Starting signaling server...")
 
@@ -139,3 +142,4 @@ httpServer.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`)
   console.log(`📊 Health: http://localhost:${PORT}/health`)
 })
+module.exports = app;
