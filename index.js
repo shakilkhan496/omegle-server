@@ -1,14 +1,17 @@
 const express = require("express")
 const { createServer } = require("http")
 const { Server } = require("socket.io")
-const cors = require('cors');
+const cors = require("cors")
 
 const app = express()
 const httpServer = createServer(app)
-app.use(cors());
-app.options('*', cors());
 
-console.log("🚀 Starting signaling server...")
+app.use(cors())
+app.options("*", cors())
+
+const log = (...args) => console.log("[signal]", ...args)
+
+log("Starting signaling server")
 
 const io = new Server(httpServer, {
   cors: {
@@ -18,103 +21,121 @@ const io = new Server(httpServer, {
   transports: ["websocket", "polling"],
 })
 
-// Simple tracking
 const connectedUsers = new Set()
 const waitingUsers = new Set()
-const activeConnections = new Map() // socketId -> partnerId
+const activeConnections = new Map()
+
+const getPartnerId = (socketId) => activeConnections.get(socketId) || null
+
+const detachPartner = (socketId) => {
+  if (!activeConnections.has(socketId)) return null
+  const partnerId = activeConnections.get(socketId)
+
+  activeConnections.delete(socketId)
+  if (partnerId) {
+    activeConnections.delete(partnerId)
+  }
+
+  return partnerId || null
+}
+
+const emitMetrics = () => {
+  log(
+    `metrics connected=${connectedUsers.size} waiting=${waitingUsers.size} active=${activeConnections.size / 2}`,
+  )
+}
 
 io.on("connection", (socket) => {
-  console.log("🔌 User connected:", socket.id)
+  log("client connected", socket.id)
   connectedUsers.add(socket.id)
+  emitMetrics()
 
   socket.on("ready", () => {
-    console.log("👤 User ready:", socket.id)
+    log("client ready", socket.id)
 
-    // Remove from any existing connection
-    if (activeConnections.has(socket.id)) {
-      const partnerId = activeConnections.get(socket.id)
-      activeConnections.delete(socket.id)
-      activeConnections.delete(partnerId)
-
-      // Notify partner
-      io.to(partnerId).emit("partnerLeft")
+    const previousPartner = detachPartner(socket.id)
+    if (previousPartner) {
+      io.to(previousPartner).emit("partnerLeft")
     }
 
-    // Remove from waiting
     waitingUsers.delete(socket.id)
 
-    // Find someone to match with
-    let partner = null
+    let partnerId = null
     for (const waitingUser of waitingUsers) {
       if (waitingUser !== socket.id && connectedUsers.has(waitingUser)) {
-        partner = waitingUser
+        partnerId = waitingUser
         break
       }
     }
 
-    if (partner) {
-      // Match found
-      waitingUsers.delete(partner)
+    if (partnerId) {
+      waitingUsers.delete(partnerId)
+      activeConnections.set(socket.id, partnerId)
+      activeConnections.set(partnerId, socket.id)
 
-      // Create connection
-      activeConnections.set(socket.id, partner)
-      activeConnections.set(partner, socket.id)
+      log("matched", socket.id, "with", partnerId)
 
-      console.log("🤝 Matched:", socket.id, "with", partner)
+      socket.emit("matched", { peerId: partnerId })
+      io.to(partnerId).emit("matched", { peerId: socket.id })
 
-      // Notify both
-      socket.emit("matched", { peerId: partner })
-      io.to(partner).emit("matched", { peerId: socket.id })
+      const greeting = {
+        message: "You're connected. Please be respectful and follow community guidelines.",
+        timestamp: Date.now(),
+      }
+      socket.emit("systemMessage", greeting)
+      io.to(partnerId).emit("systemMessage", greeting)
     } else {
-      // Add to waiting
       waitingUsers.add(socket.id)
-      console.log("⏳ Added to queue:", socket.id, "Queue size:", waitingUsers.size)
+      log("queued", socket.id, `queueSize=${waitingUsers.size}`)
     }
 
-    console.log(
-      "📊 Connected:",
-      connectedUsers.size,
-      "Waiting:",
-      waitingUsers.size,
-      "Active:",
-      activeConnections.size / 2,
-    )
+    emitMetrics()
   })
 
-  socket.on("signal", ({ to, data }) => {
-    console.log("📡 Signal from", socket.id, "to", to)
+  socket.on("signal", ({ to, data } = {}) => {
+    if (!to || !data) return
+    log("forward signal", socket.id, "->", to)
     io.to(to).emit("signal", { from: socket.id, data })
   })
 
-  socket.on("disconnect", () => {
-    console.log("🔌 User disconnected:", socket.id)
+  socket.on("chatMessage", (payload = {}) => {
+    const text = typeof payload.message === "string" ? payload.message.trim() : ""
+    if (!text) return
 
-    // Remove from all tracking
+    const partnerId = getPartnerId(socket.id)
+    if (!partnerId) {
+      socket.emit("systemMessage", {
+        message: "Chat is available once you're connected to a partner.",
+        timestamp: Date.now(),
+      })
+      return
+    }
+
+    const sanitized = text.slice(0, 2000)
+    const message = {
+      from: socket.id,
+      message: sanitized,
+      timestamp: Date.now(),
+    }
+
+    io.to(partnerId).emit("chatMessage", message)
+    log("chat", socket.id, "->", partnerId)
+  })
+
+  socket.on("disconnect", () => {
+    log("client disconnected", socket.id)
     connectedUsers.delete(socket.id)
     waitingUsers.delete(socket.id)
 
-    // Handle active connection
-    if (activeConnections.has(socket.id)) {
-      const partnerId = activeConnections.get(socket.id)
-      activeConnections.delete(socket.id)
-      activeConnections.delete(partnerId)
-
-      // Notify partner
+    const partnerId = detachPartner(socket.id)
+    if (partnerId) {
       io.to(partnerId).emit("partnerLeft")
     }
 
-    console.log(
-      "📊 Connected:",
-      connectedUsers.size,
-      "Waiting:",
-      waitingUsers.size,
-      "Active:",
-      activeConnections.size / 2,
-    )
+    emitMetrics()
   })
 })
 
-// Health check
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -139,7 +160,9 @@ app.get("/", (req, res) => {
 
 const PORT = process.env.PORT || 4000
 httpServer.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`)
-  console.log(`📊 Health: http://localhost:${PORT}/health`)
+  log(`Server listening on port ${PORT}`)
+  log(`Health check available at http://localhost:${PORT}/health`)
 })
-module.exports = app;
+
+module.exports = app
+
